@@ -1,1 +1,22 @@
+name: hc05_rover_controller
+description: Cyberpunk Flutter Bluetooth & Voice Controller for Arduino HC-05 robot car.
+publish_to: 'none'
+version: 1.0.0+1
 
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_bluetooth_serial: ^0.4.0
+  speech_to_text: ^7.0.0
+  permission_handler: ^11.3.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
