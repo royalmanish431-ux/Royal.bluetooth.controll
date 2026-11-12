@@ -26,7 +26,7 @@ jobs:
       - name: Initialize Android Platform Files
         run: flutter create --platforms=android --project-name hc05_rover_controller .
 
-      - name: Configure Native Bluetooth Socket, SDK & Permissions
+      - name: Configure Native BLE GATT Engine, SDK & Permissions
         run: |
           flutter pub get
           sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 34/g' android/app/build.gradle
@@ -39,28 +39,28 @@ jobs:
           package com.example.hc05_rover_controller
 
           import android.annotation.SuppressLint
-          import android.bluetooth.BluetoothAdapter
-          import android.bluetooth.BluetoothDevice
-          import android.bluetooth.BluetoothSocket
+          import android.bluetooth.*
+          import android.content.Context
+          import android.os.Build
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
-          import java.io.OutputStream
           import java.util.UUID
-          import kotlin.concurrent.thread
 
           class MainActivity: FlutterActivity() {
               private val CHANNEL = "com.example.hc05_rover_controller/bluetooth"
-              private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
-              private var btSocket: BluetoothSocket? = null
-              private var outStream: OutputStream? = null
+              private var bluetoothGatt: BluetoothGatt? = null
+              private var txCharacteristic: BluetoothGattCharacteristic? = null
+              private var pendingConnectResult: MethodChannel.Result? = null
+              private var isGattReady = false
 
               @SuppressLint("MissingPermission")
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
 
                   MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
-                      val adapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
+                      val manager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+                      val adapter: BluetoothAdapter? = manager.adapter
 
                       when (call.method) {
                           "getBondedDevices" -> {
@@ -80,80 +80,139 @@ jobs:
                                   result.error("INVALID", "Adapter or address missing", null)
                                   return@setMethodCallHandler
                               }
-                              thread {
-                                  adapter.cancelDiscovery()
-                                  try { outStream?.close() } catch (_: Exception) {}
-                                  try { btSocket?.close() } catch (_: Exception) {}
-                                  Thread.sleep(300)
 
-                                  val device: BluetoothDevice = adapter.getRemoteDevice(address)
-                                  var connectedSocket: BluetoothSocket? = null
-                                  var lastError = "Connection failed"
+                              try {
+                                  bluetoothGatt?.disconnect()
+                                  bluetoothGatt?.close()
+                              } catch (_: Exception) {}
 
-                                  // 1. Try Insecure SPP UUID (Best for HC-05 on Android 12+)
-                                  try {
-                                      val s = device.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
-                                      s.connect()
-                                      connectedSocket = s
-                                  } catch (e: Exception) {
-                                      lastError = e.message ?: "Insecure UUID failed"
-                                  }
+                              bluetoothGatt = null
+                              txCharacteristic = null
+                              isGattReady = false
+                              pendingConnectResult = result
 
-                                  // 2. Fallback: Insecure Reflection Channel 1
-                                  if (connectedSocket == null) {
-                                      try {
-                                          val m = device.javaClass.getMethod("createInsecureRfcommSocket", Int::class.javaPrimitiveType)
-                                          val s = m.invoke(device, 1) as BluetoothSocket
-                                          s.connect()
-                                          connectedSocket = s
-                                      } catch (e: Exception) {
-                                          lastError = e.message ?: "Insecure Ch1 failed"
+                              val device: BluetoothDevice = adapter.getRemoteDevice(address)
+                              val callback = object : BluetoothGattCallback() {
+                                  override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                                      if (newState == BluetoothProfile.STATE_CONNECTED) {
+                                          gatt.discoverServices()
+                                      } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                                          isGattReady = false
+                                          txCharacteristic = null
+                                          val res = pendingConnectResult
+                                          pendingConnectResult = null
+                                          if (res != null) {
+                                              runOnUiThread { res.error("BLE_DISC", "BLE disconnected (status $status)", null) }
+                                          }
                                       }
                                   }
 
-                                  // 3. Fallback: Secure SPP UUID
-                                  if (connectedSocket == null) {
-                                      try {
-                                          val s = device.createRfcommSocketToServiceRecord(SPP_UUID)
-                                          s.connect()
-                                          connectedSocket = s
-                                      } catch (e: Exception) {
-                                          lastError = e.message ?: "Secure UUID failed"
+                                  override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+                                      if (status == BluetoothGatt.GATT_SUCCESS) {
+                                          var foundChar: BluetoothGattCharacteristic? = null
+                                          // 1. Prefer standard HM-10 / JDY-31 / CC2541 UART characteristic (FFE1)
+                                          for (service in gatt.services) {
+                                              for (ch in service.characteristics) {
+                                                  val uuidStr = ch.uuid.toString().lowercase()
+                                                  val props = ch.properties
+                                                  val canWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0 ||
+                                                                 (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                                                  if (canWrite && uuidStr.contains("ffe1")) {
+                                                      foundChar = ch
+                                                      break
+                                                  }
+                                              }
+                                              if (foundChar != null) break
+                                          }
+                                          // 2. Fallback: Any custom writable characteristic (skip standard GAP/GATT 0x1800/0x1801)
+                                          if (foundChar == null) {
+                                              for (service in gatt.services) {
+                                                  val sUuid = service.uuid.toString().lowercase()
+                                                  if (sUuid.startsWith("00001800") || sUuid.startsWith("00001801")) continue
+                                                  for (ch in service.characteristics) {
+                                                      val props = ch.properties
+                                                      val canWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0 ||
+                                                                     (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                                                      if (canWrite) {
+                                                          foundChar = ch
+                                                          break
+                                                      }
+                                                  }
+                                                  if (foundChar != null) break
+                                              }
+                                          }
+
+                                          txCharacteristic = foundChar
+                                          isGattReady = foundChar != null
+                                          val res = pendingConnectResult
+                                          pendingConnectResult = null
+                                          if (res != null) {
+                                              runOnUiThread {
+                                                  if (isGattReady) {
+                                                      res.success(true)
+                                                  } else {
+                                                      res.error("NO_CHAR", "No writable BLE UART characteristic found", null)
+                                                  }
+                                              }
+                                          }
+                                      } else {
+                                          val res = pendingConnectResult
+                                          pendingConnectResult = null
+                                          if (res != null) {
+                                              runOnUiThread { res.error("DISC_FAIL", "Service discovery failed: $status", null) }
+                                          }
                                       }
                                   }
+                              }
 
-                                  if (connectedSocket != null && connectedSocket.isConnected) {
-                                      btSocket = connectedSocket
-                                      outStream = connectedSocket.outputStream
-                                      runOnUiThread { result.success(true) }
-                                  } else {
-                                      runOnUiThread { result.error("CONN_FAIL", lastError, null) }
-                                  }
+                              bluetoothGatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                  device.connectGatt(this, false, callback, BluetoothDevice.TRANSPORT_LE)
+                              } else {
+                                  device.connectGatt(this, false, callback)
                               }
                           }
 
                           "send" -> {
                               val data = call.argument<String>("data") ?: ""
-                              try {
-                                  if (outStream != null && btSocket?.isConnected == true) {
-                                      outStream?.write(data.toByteArray())
-                                      outStream?.flush()
+                              val gatt = bluetoothGatt
+                              val ch = txCharacteristic
+                              if (gatt != null && ch != null && isGattReady) {
+                                  val bytes = data.toByteArray(Charsets.UTF_8)
+                                  val writeType = if ((ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
+                                      BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                                  } else {
+                                      BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                                  }
+
+                                  val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                      gatt.writeCharacteristic(ch, bytes, writeType) == BluetoothStatusCodes.SUCCESS
+                                  } else {
+                                      @Suppress("DEPRECATION")
+                                      ch.writeType = writeType
+                                      @Suppress("DEPRECATION")
+                                      ch.value = bytes
+                                      @Suppress("DEPRECATION")
+                                      gatt.writeCharacteristic(ch)
+                                  }
+
+                                  if (ok) {
                                       result.success(true)
                                   } else {
-                                      result.error("NOT_CONN", "Socket not connected", null)
+                                      result.error("WRITE_FAIL", "BLE write failed", null)
                                   }
-                              } catch (e: Exception) {
-                                  result.error("SEND_ERR", e.message, null)
+                              } else {
+                                  result.error("NOT_CONN", "BLE not connected", null)
                               }
                           }
 
                           "disconnect" -> {
                               try {
-                                  outStream?.close()
-                                  btSocket?.close()
+                                  bluetoothGatt?.disconnect()
+                                  bluetoothGatt?.close()
                               } catch (_: Exception) {}
-                              outStream = null
-                              btSocket = null
+                              bluetoothGatt = null
+                              txCharacteristic = null
+                              isGattReady = false
                               result.success(true)
                           }
 
