@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:permission_handler/permission_handler.dart';
@@ -44,6 +45,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
   bool _isListening = false;
   String _voiceText = 'Tap Mic & Say: Go, Back, Left, Right, Stop';
   String _lastSentCommand = 'None';
+  String _debugStatus = '';
 
   @override
   void initState() {
@@ -62,10 +64,18 @@ class _ControllerScreenState extends State<ControllerScreen> {
     ].request();
 
     try {
+      await FlutterBluetoothSerial.instance.cancelDiscovery();
       List<BluetoothDevice> bonded =
           await FlutterBluetoothSerial.instance.getBondedDevices();
       setState(() {
         _devices = bonded;
+        if (_devices.isNotEmpty && _selectedDevice == null) {
+          // Auto-select HC-05 if available
+          _selectedDevice = _devices.firstWhere(
+            (d) => (d.name ?? '').toUpperCase().contains('HC-05'),
+            orElse: () => _devices.first,
+          );
+        }
       });
     } catch (e) {
       _showSnack('Bluetooth error: Enable Bluetooth first');
@@ -73,17 +83,27 @@ class _ControllerScreenState extends State<ControllerScreen> {
   }
 
   Future<void> _connectToDevice(BluetoothDevice device) async {
+    if (_isConnecting) return;
+
     setState(() {
       _isConnecting = true;
       _selectedDevice = device;
+      _debugStatus = 'Connecting to ${device.address}...';
     });
 
     try {
+      // Cancel any ongoing discovery as it slows/blocks RFCOMM connections
+      await FlutterBluetoothSerial.instance.cancelDiscovery();
+      await Future.delayed(const Duration(milliseconds: 300));
+
       BluetoothConnection connection =
-          await BluetoothConnection.toAddress(device.address);
+          await BluetoothConnection.toAddress(device.address)
+              .timeout(const Duration(seconds: 8));
+
       setState(() {
         _connection = connection;
         _isConnecting = false;
+        _debugStatus = '';
       });
       _showSnack('Connected to ${device.name}');
 
@@ -95,11 +115,18 @@ class _ControllerScreenState extends State<ControllerScreen> {
           _showSnack('Disconnected from car');
         }
       });
+    } on PlatformException catch (e) {
+      setState(() {
+        _isConnecting = false;
+        _debugStatus = 'Error: ${e.message ?? e.code}';
+      });
+      _showSnack('Failed: ${e.message ?? "Check HC-05 power"}');
     } catch (e) {
       setState(() {
         _isConnecting = false;
+        _debugStatus = 'Timeout / Socket closed';
       });
-      _showSnack('Connection failed! Make sure HC-05 is ON');
+      _showSnack('Connection timeout! Restart HC-05 & retry');
     }
   }
 
@@ -107,7 +134,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
     await _connection?.close();
     setState(() {
       _connection = null;
-      _selectedDevice = null;
+      _debugStatus = '';
     });
   }
 
@@ -316,29 +343,70 @@ class _ControllerScreenState extends State<ControllerScreen> {
             _buildStatusSign(),
             const SizedBox(height: 12),
 
-            // Paired Device Selector Dropdown
+            // Paired Device Selector + Connect Button
             if (!_isConnected)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1E293B),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: DropdownButtonHideUnderline(
-                  child: DropdownButton<BluetoothDevice>(
-                    isExpanded: true,
-                    hint: const Text('Select Paired HC-05 Device'),
-                    value: _selectedDevice,
-                    items: _devices.map((device) {
-                      return DropdownMenuItem(
-                        value: device,
-                        child: Text('${device.name} (${device.address})'),
-                      );
-                    }).toList(),
-                    onChanged: (device) {
-                      if (device != null) _connectToDevice(device);
-                    },
+              Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E293B),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<BluetoothDevice>(
+                          isExpanded: true,
+                          hint: const Text('Select HC-05'),
+                          value: _devices.contains(_selectedDevice)
+                              ? _selectedDevice
+                              : null,
+                          items: _devices.map((device) {
+                            return DropdownMenuItem(
+                              value: device,
+                              child: Text(
+                                '${device.name ?? "Unknown"} (${device.address})',
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            );
+                          }).toList(),
+                          onChanged: (device) {
+                            setState(() {
+                              _selectedDevice = device;
+                            });
+                          },
+                        ),
+                      ),
+                    ),
                   ),
+                  const SizedBox(width: 10),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF00E5FF),
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 18, vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    onPressed: (_selectedDevice != null && !_isConnecting)
+                        ? () => _connectToDevice(_selectedDevice!)
+                        : null,
+                    child: Text(
+                      _isConnecting ? 'WAIT...' : 'CONNECT',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ),
+
+            if (_debugStatus.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8.0),
+                child: Text(
+                  _debugStatus,
+                  style: const TextStyle(color: Colors.amber, fontSize: 12),
                 ),
               ),
 
