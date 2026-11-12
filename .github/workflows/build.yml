@@ -81,30 +81,53 @@ jobs:
                                   return@setMethodCallHandler
                               }
                               thread {
+                                  adapter.cancelDiscovery()
+                                  try { outStream?.close() } catch (_: Exception) {}
+                                  try { btSocket?.close() } catch (_: Exception) {}
+                                  Thread.sleep(300)
+
+                                  val device: BluetoothDevice = adapter.getRemoteDevice(address)
+                                  var connectedSocket: BluetoothSocket? = null
+                                  var lastError = "Connection failed"
+
+                                  // 1. Try Insecure SPP UUID (Best for HC-05 on Android 12+)
                                   try {
-                                      adapter.cancelDiscovery()
-                                      btSocket?.close()
-                                      val device: BluetoothDevice = adapter.getRemoteDevice(address)
-                                      var socket: BluetoothSocket? = null
-                                      try {
-                                          socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
-                                          socket.connect()
-                                      } catch (e1: Exception) {
-                                          try {
-                                              socket?.close()
-                                              val m = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
-                                              socket = m.invoke(device, 1) as BluetoothSocket
-                                              socket.connect()
-                                          } catch (e2: Exception) {
-                                              runOnUiThread { result.error("CONN_FAIL", e2.message ?: "RFCOMM failed", null) }
-                                              return@thread
-                                          }
-                                      }
-                                      btSocket = socket
-                                      outStream = socket?.outputStream
-                                      runOnUiThread { result.success(true) }
+                                      val s = device.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
+                                      s.connect()
+                                      connectedSocket = s
                                   } catch (e: Exception) {
-                                      runOnUiThread { result.error("CONN_ERR", e.message, null) }
+                                      lastError = e.message ?: "Insecure UUID failed"
+                                  }
+
+                                  // 2. Fallback: Insecure Reflection Channel 1
+                                  if (connectedSocket == null) {
+                                      try {
+                                          val m = device.javaClass.getMethod("createInsecureRfcommSocket", Int::class.javaPrimitiveType)
+                                          val s = m.invoke(device, 1) as BluetoothSocket
+                                          s.connect()
+                                          connectedSocket = s
+                                      } catch (e: Exception) {
+                                          lastError = e.message ?: "Insecure Ch1 failed"
+                                      }
+                                  }
+
+                                  // 3. Fallback: Secure SPP UUID
+                                  if (connectedSocket == null) {
+                                      try {
+                                          val s = device.createRfcommSocketToServiceRecord(SPP_UUID)
+                                          s.connect()
+                                          connectedSocket = s
+                                      } catch (e: Exception) {
+                                          lastError = e.message ?: "Secure UUID failed"
+                                      }
+                                  }
+
+                                  if (connectedSocket != null && connectedSocket.isConnected) {
+                                      btSocket = connectedSocket
+                                      outStream = connectedSocket.outputStream
+                                      runOnUiThread { result.success(true) }
+                                  } else {
+                                      runOnUiThread { result.error("CONN_FAIL", lastError, null) }
                                   }
                               }
                           }
