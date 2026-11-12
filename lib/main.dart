@@ -1,8 +1,6 @@
-import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:permission_handler/permission_handler.dart';
 
@@ -35,11 +33,13 @@ class ControllerScreen extends StatefulWidget {
 }
 
 class _ControllerScreenState extends State<ControllerScreen> {
-  BluetoothConnection? _connection;
-  List<BluetoothDevice> _devices = [];
-  BluetoothDevice? _selectedDevice;
+  static const MethodChannel _btChannel =
+      MethodChannel('com.example.hc05_rover_controller/bluetooth');
+
+  List> _devices = [];
+  Map<String, String>? _selectedDevice;
   bool _isConnecting = false;
-  bool get _isConnected => _connection != null && _connection!.isConnected;
+  bool _isConnected = false;
 
   late stt.SpeechToText _speech;
   bool _isListening = false;
@@ -64,90 +64,82 @@ class _ControllerScreenState extends State<ControllerScreen> {
     ].request();
 
     try {
-      await FlutterBluetoothSerial.instance.cancelDiscovery();
-      List<BluetoothDevice> bonded =
-          await FlutterBluetoothSerial.instance.getBondedDevices();
+      final List<dynamic> result =
+          await _btChannel.invokeMethod('getBondedDevices');
+      final parsed = result
+          .map((item) => {
+                'name': item['name']?.toString() ?? 'Unknown',
+                'address': item['address']?.toString() ?? '',
+              })
+          .toList();
+
       setState(() {
-        _devices = bonded;
-        if (_devices.isNotEmpty && _selectedDevice == null) {
-          // Auto-select HC-05 if available
+        _devices = parsed;
+        if (_devices.isNotEmpty) {
           _selectedDevice = _devices.firstWhere(
-            (d) => (d.name ?? '').toUpperCase().contains('HC-05'),
+            (d) => d['name']!.toUpperCase().contains('HC-05'),
             orElse: () => _devices.first,
           );
         }
       });
-    } catch (e) {
-      _showSnack('Bluetooth error: Enable Bluetooth first');
+    } on PlatformException catch (e) {
+      _showSnack('Bluetooth Error: ${e.message}');
     }
   }
 
-  Future<void> _connectToDevice(BluetoothDevice device) async {
+  Future<void> _connectToDevice(Map<String, String> device) async {
     if (_isConnecting) return;
 
     setState(() {
       _isConnecting = true;
-      _selectedDevice = device;
-      _debugStatus = 'Connecting to ${device.address}...';
+      _debugStatus = 'Connecting to ${device['name']}...';
     });
 
     try {
-      // Cancel any ongoing discovery as it slows/blocks RFCOMM connections
-      await FlutterBluetoothSerial.instance.cancelDiscovery();
-      await Future.delayed(const Duration(milliseconds: 300));
-
-      BluetoothConnection connection =
-          await BluetoothConnection.toAddress(device.address)
-              .timeout(const Duration(seconds: 8));
+      final bool connected = await _btChannel.invokeMethod(
+        'connect',
+        {'address': device['address']},
+      );
 
       setState(() {
-        _connection = connection;
+        _isConnected = connected;
         _isConnecting = false;
-        _debugStatus = '';
+        _debugStatus = connected ? '' : 'Connection returned false';
       });
-      _showSnack('Connected to ${device.name}');
 
-      connection.input?.listen(null).onDone(() {
-        if (mounted) {
-          setState(() {
-            _connection = null;
-          });
-          _showSnack('Disconnected from car');
-        }
-      });
+      if (connected) {
+        _showSnack('Connected to ${device['name']}');
+      }
     } on PlatformException catch (e) {
       setState(() {
+        _isConnected = false;
         _isConnecting = false;
-        _debugStatus = 'Error: ${e.message ?? e.code}';
+        _debugStatus = 'Error: ${e.message}';
       });
-      _showSnack('Failed: ${e.message ?? "Check HC-05 power"}');
-    } catch (e) {
-      setState(() {
-        _isConnecting = false;
-        _debugStatus = 'Timeout / Socket closed';
-      });
-      _showSnack('Connection timeout! Restart HC-05 & retry');
+      _showSnack('Failed: ${e.message}');
     }
   }
 
-  void _disconnect() async {
-    await _connection?.close();
+  Future<void> _disconnect() async {
+    try {
+      await _btChannel.invokeMethod('disconnect');
+    } catch (_) {}
     setState(() {
-      _connection = null;
+      _isConnected = false;
       _debugStatus = '';
     });
   }
 
-  void _sendCommand(String cmd) {
+  Future<void> _sendCommand(String cmd) async {
     setState(() {
       _lastSentCommand = cmd;
     });
     if (_isConnected) {
       try {
-        _connection!.output.add(Uint8List.fromList(utf8.encode(cmd)));
-        _connection!.output.allSent;
-      } catch (e) {
-        _showSnack('Send error: $e');
+        await _btChannel.invokeMethod('send', {'data': cmd});
+      } on PlatformException catch (e) {
+        setState(() => _isConnected = false);
+        _showSnack('Disconnected: ${e.message}');
       }
     } else {
       _showSnack('Not connected to HC-05!');
@@ -185,7 +177,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
           },
         );
       } else {
-        _showSnack('Speech recognition not available on this phone');
+        _showSnack('Speech recognition not available');
       }
     } else {
       setState(() => _isListening = false);
@@ -229,7 +221,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
       statusText = 'Connecting...';
     } else if (_isConnected) {
       dotColor = const Color(0xFF00E676);
-      statusText = 'Connected: ${_selectedDevice?.name ?? "HC-05"}';
+      statusText = 'Connected: ${_selectedDevice?['name'] ?? "HC-05"}';
     }
 
     return Container(
@@ -339,11 +331,9 @@ class _ControllerScreenState extends State<ControllerScreen> {
         padding: const EdgeInsets.all(16.0),
         child: Column(
           children: [
-            // 1. Bluetooth Live Status Sign
             _buildStatusSign(),
             const SizedBox(height: 12),
 
-            // Paired Device Selector + Connect Button
             if (!_isConnected)
               Row(
                 children: [
@@ -355,25 +345,26 @@ class _ControllerScreenState extends State<ControllerScreen> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: DropdownButtonHideUnderline(
-                        child: DropdownButton<BluetoothDevice>(
+                        child: DropdownButton<String>(
                           isExpanded: true,
                           hint: const Text('Select HC-05'),
-                          value: _devices.contains(_selectedDevice)
-                              ? _selectedDevice
-                              : null,
+                          value: _selectedDevice?['address'],
                           items: _devices.map((device) {
-                            return DropdownMenuItem(
-                              value: device,
+                            return DropdownMenuItem<String>(
+                              value: device['address'],
                               child: Text(
-                                '${device.name ?? "Unknown"} (${device.address})',
+                                '${device['name']} (${device['address']})',
                                 overflow: TextOverflow.ellipsis,
                               ),
                             );
                           }).toList(),
-                          onChanged: (device) {
-                            setState(() {
-                              _selectedDevice = device;
-                            });
+                          onChanged: (addr) {
+                            if (addr != null) {
+                              setState(() {
+                                _selectedDevice = _devices.firstWhere(
+                                    (d) => d['address'] == addr);
+                              });
+                            }
                           },
                         ),
                       ),
@@ -412,7 +403,6 @@ class _ControllerScreenState extends State<ControllerScreen> {
 
             const Spacer(),
 
-            // 2. Directional Touch Controls (D-Pad)
             Column(
               children: [
                 _buildControlBtn(Icons.keyboard_arrow_up, 'FORWARD', 'F'),
@@ -435,7 +425,6 @@ class _ControllerScreenState extends State<ControllerScreen> {
 
             const Spacer(),
 
-            // 3. Voice Control Section
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(16),
