@@ -29,12 +29,10 @@ jobs:
       - name: Fix Gradle Namespace & Permissions for Legacy Bluetooth Plugin
         run: |
           flutter pub get
-          # Fix namespace error in flutter_bluetooth_serial for AGP 8+
-          PLUGIN_BUILD_GRADLE=$(find ~/.pub-cache -name "build.gradle" | grep "flutter_bluetooth_serial")
+          PLUGIN_BUILD_GRADLE=$(find ~/.pub-cache -path "*/flutter_bluetooth_serial-*/android/build.gradle" | head -n 1)
           if [ -n "$PLUGIN_BUILD_GRADLE" ]; then
             sed -i 's/android {/android {\n    namespace "io.github.edufolly.flutterbluetoothserial"/' "$PLUGIN_BUILD_GRADLE"
           fi
-          # Inject Bluetooth & Mic Permissions into generated AndroidManifest.xml
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           sed -i 's/<application/<uses-permission android:name="android.permission.BLUETOOTH" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" \/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" \/>\n    <uses-permission android:name="android.permission.RECORD_AUDIO" \/>\n    <application/' "$MANIFEST"
 
