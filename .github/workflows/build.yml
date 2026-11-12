@@ -26,18 +26,120 @@ jobs:
       - name: Initialize Android Platform Files
         run: flutter create --platforms=android --project-name hc05_rover_controller .
 
-      - name: Fix Legacy Bluetooth Plugin, SDK & Permissions
+      - name: Configure Native Bluetooth Socket, SDK & Permissions
         run: |
           flutter pub get
-          PLUGIN_BUILD_GRADLE=$(find ~/.pub-cache -path "*/flutter_bluetooth_serial-*/android/build.gradle" | head -n 1)
-          if [ -n "$PLUGIN_BUILD_GRADLE" ]; then
-            sed -i 's/compileSdkVersion 30/compileSdkVersion 34/g' "$PLUGIN_BUILD_GRADLE"
-            sed -i 's/android {/android {\n    namespace "io.github.edufolly.flutterbluetoothserial"/' "$PLUGIN_BUILD_GRADLE"
-          fi
           sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 34/g' android/app/build.gradle
           sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           sed -i 's/<application/<uses-permission android:name="android.permission.BLUETOOTH" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" \/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" \/>\n    <uses-permission android:name="android.permission.RECORD_AUDIO" \/>\n    <application/' "$MANIFEST"
+
+          MAIN_KT=$(find android/app/src/main/kotlin -name "MainActivity.kt" | head -n 1)
+          cat << 'EOF' > "$MAIN_KT"
+          package com.example.hc05_rover_controller
+
+          import android.annotation.SuppressLint
+          import android.bluetooth.BluetoothAdapter
+          import android.bluetooth.BluetoothDevice
+          import android.bluetooth.BluetoothSocket
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+          import java.io.OutputStream
+          import java.util.UUID
+          import kotlin.concurrent.thread
+
+          class MainActivity: FlutterActivity() {
+              private val CHANNEL = "com.example.hc05_rover_controller/bluetooth"
+              private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+              private var btSocket: BluetoothSocket? = null
+              private var outStream: OutputStream? = null
+
+              @SuppressLint("MissingPermission")
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+                      val adapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
+
+                      when (call.method) {
+                          "getBondedDevices" -> {
+                              if (adapter == null || !adapter.isEnabled) {
+                                  result.error("BT_OFF", "Bluetooth is disabled", null)
+                                  return@setMethodCallHandler
+                              }
+                              val list = adapter.bondedDevices.map { device ->
+                                  mapOf("name" to (device.name ?: "Unknown"), "address" to device.address)
+                              }
+                              result.success(list)
+                          }
+
+                          "connect" -> {
+                              val address = call.argument<String>("address")
+                              if (adapter == null || address == null) {
+                                  result.error("INVALID", "Adapter or address missing", null)
+                                  return@setMethodCallHandler
+                              }
+                              thread {
+                                  try {
+                                      adapter.cancelDiscovery()
+                                      btSocket?.close()
+                                      val device: BluetoothDevice = adapter.getRemoteDevice(address)
+                                      var socket: BluetoothSocket? = null
+                                      try {
+                                          socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
+                                          socket.connect()
+                                      } catch (e1: Exception) {
+                                          try {
+                                              socket?.close()
+                                              val m = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+                                              socket = m.invoke(device, 1) as BluetoothSocket
+                                              socket.connect()
+                                          } catch (e2: Exception) {
+                                              runOnUiThread { result.error("CONN_FAIL", e2.message ?: "RFCOMM failed", null) }
+                                              return@thread
+                                          }
+                                      }
+                                      btSocket = socket
+                                      outStream = socket?.outputStream
+                                      runOnUiThread { result.success(true) }
+                                  } catch (e: Exception) {
+                                      runOnUiThread { result.error("CONN_ERR", e.message, null) }
+                                  }
+                              }
+                          }
+
+                          "send" -> {
+                              val data = call.argument<String>("data") ?: ""
+                              try {
+                                  if (outStream != null && btSocket?.isConnected == true) {
+                                      outStream?.write(data.toByteArray())
+                                      outStream?.flush()
+                                      result.success(true)
+                                  } else {
+                                      result.error("NOT_CONN", "Socket not connected", null)
+                                  }
+                              } catch (e: Exception) {
+                                  result.error("SEND_ERR", e.message, null)
+                              }
+                          }
+
+                          "disconnect" -> {
+                              try {
+                                  outStream?.close()
+                                  btSocket?.close()
+                              } catch (_: Exception) {}
+                              outStream = null
+                              btSocket = null
+                              result.success(true)
+                          }
+
+                          else -> result.notImplemented()
+                      }
+                  }
+              }
+          }
+          EOF
 
       - name: Build Release APK
         run: flutter build apk --release --no-tree-shake-icons
