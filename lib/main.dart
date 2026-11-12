@@ -36,8 +36,8 @@ class _ControllerScreenState extends State<ControllerScreen> {
   static const MethodChannel _btChannel =
       MethodChannel('com.example.hc05_rover_controller/bluetooth');
 
-  List> _devices = [];
-  Map<String, String>? _selectedDevice;
+  List _devices = [];
+  dynamic _selectedDevice;
   bool _isConnecting = false;
   bool _isConnected = false;
 
@@ -64,8 +64,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
     ].request();
 
     try {
-      final List<dynamic> result =
-          await _btChannel.invokeMethod('getBondedDevices');
+      final List result = await _btChannel.invokeMethod('getBondedDevices');
       final parsed = result
           .map((item) => {
                 'name': item['name']?.toString() ?? 'Unknown',
@@ -77,7 +76,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
         _devices = parsed;
         if (_devices.isNotEmpty) {
           _selectedDevice = _devices.firstWhere(
-            (d) => d['name']!.toUpperCase().contains('HC-05'),
+            (d) => d['name'].toString().toUpperCase().contains('HC-05'),
             orElse: () => _devices.first,
           );
         }
@@ -87,7 +86,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
     }
   }
 
-  Future<void> _connectToDevice(Map<String, String> device) async {
+  Future<void> _connectToDevice(dynamic device) async {
     if (_isConnecting) return;
 
     setState(() {
@@ -349,7 +348,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
                           isExpanded: true,
                           hint: const Text('Select HC-05'),
                           value: _selectedDevice?['address'],
-                          items: _devices.map((device) {
+                          items: _devices.map<DropdownMenuItem<String>>((device) {
                             return DropdownMenuItem<String>(
                               value: device['address'],
                               child: Text(
@@ -382,7 +381,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
                       ),
                     ),
                     onPressed: (_selectedDevice != null && !_isConnecting)
-                        ? () => _connectToDevice(_selectedDevice!)
+                        ? () => _connectToDevice(_selectedDevice)
                         : null,
                     child: Text(
                       _isConnecting ? 'WAIT...' : 'CONNECT',
