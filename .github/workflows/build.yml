@@ -20,19 +20,21 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
+          flutter-version: '3.16.9'
           channel: 'stable'
 
       - name: Initialize Android Platform Files
         run: flutter create --platforms=android --project-name hc05_rover_controller .
 
-      - name: Fix Gradle Namespace & Permissions for Legacy Bluetooth Plugin
+      - name: Fix Legacy Bluetooth Plugin & Permissions
         run: |
           flutter pub get
           PLUGIN_BUILD_GRADLE=$(find ~/.pub-cache -path "*/flutter_bluetooth_serial-*/android/build.gradle" | head -n 1)
           if [ -n "$PLUGIN_BUILD_GRADLE" ]; then
+            sed -i 's/compileSdkVersion 30/compileSdkVersion 34/g' "$PLUGIN_BUILD_GRADLE"
             sed -i 's/android {/android {\n    namespace "io.github.edufolly.flutterbluetoothserial"/' "$PLUGIN_BUILD_GRADLE"
           fi
+          sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 34/g' android/app/build.gradle
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           sed -i 's/<application/<uses-permission android:name="android.permission.BLUETOOTH" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" \/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" \/>\n    <uses-permission android:name="android.permission.RECORD_AUDIO" \/>\n    <application/' "$MANIFEST"
 
