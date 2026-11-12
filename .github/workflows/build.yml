@@ -1,8 +1,8 @@
-name: Build Release APK
+name: Build Flutter APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -11,33 +11,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
-          # Dhyan dein: Yahan 'cache: gradle' bilkul mat lagana
 
-      - name: Set up Flutter
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Create complete Flutter skeleton
+      - name: Initialize Android Platform Files
+        run: flutter create --platforms=android .
+
+      - name: Get Dependencies & Build APK
         run: |
-          flutter create temp_app --org com.royal.controller
-          cp -r temp_app/android ./android
-          rm -rf temp_app
+          flutter pub get
+          flutter build apk --release
 
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Build Android APK
-        run: flutter build apk --release
-
-      - name: Upload APK artifact
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Royal-Bluetooth-Rover-APK
+          name: RoboCar-Controller-APK
           path: build/app/outputs/flutter-apk/app-release.apk
-          
