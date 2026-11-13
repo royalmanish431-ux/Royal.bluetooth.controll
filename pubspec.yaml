@@ -9,7 +9,6 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  speech_to_text: ^6.6.0
   permission_handler: ^11.3.0
 
 dev_dependencies:
