@@ -26,13 +26,13 @@ jobs:
       - name: Initialize Android Platform Files
         run: flutter create --platforms=android --project-name hc05_rover_controller .
 
-      - name: Configure Native BLE GATT Engine, SDK & Permissions
+      - name: Configure Continuous SpeechRecognizer, BLE & Permissions
         run: |
           flutter pub get
           sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 34/g' android/app/build.gradle
           sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          sed -i 's/<application/<uses-permission android:name="android.permission.BLUETOOTH" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" \/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" \/>\n    <uses-permission android:name="android.permission.RECORD_AUDIO" \/>\n    <application/' "$MANIFEST"
+          sed -i 's/<application/<uses-permission android:name="android.permission.BLUETOOTH" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" \/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" \/>\n    <uses-permission android:name="android.permission.RECORD_AUDIO" \/>\n    <queries>\n        <intent>\n            <action android:name="android.speech.RecognitionService" \/>\n        <\/intent>\n    <\/queries>\n    <application/' "$MANIFEST"
 
           MAIN_KT=$(find android/app/src/main/kotlin -name "MainActivity.kt" | head -n 1)
           cat << 'EOF' > "$MAIN_KT"
@@ -41,24 +41,37 @@ jobs:
           import android.annotation.SuppressLint
           import android.bluetooth.*
           import android.content.Context
+          import android.content.Intent
           import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
-          import java.util.UUID
 
           class MainActivity: FlutterActivity() {
               private val CHANNEL = "com.example.hc05_rover_controller/bluetooth"
+              private var methodChannel: MethodChannel? = null
+
               private var bluetoothGatt: BluetoothGatt? = null
               private var txCharacteristic: BluetoothGattCharacteristic? = null
               private var pendingConnectResult: MethodChannel.Result? = null
               private var isGattReady = false
 
+              private var speechRecognizer: SpeechRecognizer? = null
+              private var isContinuousListening = false
+              private val mainHandler = Handler(Looper.getMainLooper())
+
               @SuppressLint("MissingPermission")
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
+                  methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
 
-                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+                  methodChannel?.setMethodCallHandler { call, result ->
                       val manager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
                       val adapter: BluetoothAdapter? = manager.adapter
 
@@ -72,6 +85,26 @@ jobs:
                                   mapOf("name" to (device.name ?: "Unknown"), "address" to device.address)
                               }
                               result.success(list)
+                          }
+
+                          "startContinuousVoice" -> {
+                              if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                                  result.error("NO_SPEECH", "Speech recognition unavailable", null)
+                                  return@setMethodCallHandler
+                              }
+                              isContinuousListening = true
+                              startListeningCycle()
+                              result.success(true)
+                          }
+
+                          "stopContinuousVoice" -> {
+                              isContinuousListening = false
+                              try {
+                                  speechRecognizer?.stopListening()
+                                  speechRecognizer?.destroy()
+                              } catch (_: Exception) {}
+                              speechRecognizer = null
+                              result.success(true)
                           }
 
                           "connect" -> {
@@ -110,7 +143,6 @@ jobs:
                                   override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
                                       if (status == BluetoothGatt.GATT_SUCCESS) {
                                           var foundChar: BluetoothGattCharacteristic? = null
-                                          // 1. Prefer standard HM-10 / JDY-31 / CC2541 UART characteristic (FFE1)
                                           for (service in gatt.services) {
                                               for (ch in service.characteristics) {
                                                   val uuidStr = ch.uuid.toString().lowercase()
@@ -124,7 +156,6 @@ jobs:
                                               }
                                               if (foundChar != null) break
                                           }
-                                          // 2. Fallback: Any custom writable characteristic (skip standard GAP/GATT 0x1800/0x1801)
                                           if (foundChar == null) {
                                               for (service in gatt.services) {
                                                   val sUuid = service.uuid.toString().lowercase()
@@ -178,11 +209,7 @@ jobs:
                               val ch = txCharacteristic
                               if (gatt != null && ch != null && isGattReady) {
                                   val bytes = data.toByteArray(Charsets.UTF_8)
-                                  val writeType = if ((ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
-                                      BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                                  } else {
-                                      BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                                  }
+                                  val writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
 
                                   val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                       gatt.writeCharacteristic(ch, bytes, writeType) == BluetoothStatusCodes.SUCCESS
@@ -198,7 +225,17 @@ jobs:
                                   if (ok) {
                                       result.success(true)
                                   } else {
-                                      result.error("WRITE_FAIL", "BLE write failed", null)
+                                      val ok2 = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                          gatt.writeCharacteristic(ch, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
+                                      } else {
+                                          @Suppress("DEPRECATION")
+                                          ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                                          @Suppress("DEPRECATION")
+                                          ch.value = bytes
+                                          @Suppress("DEPRECATION")
+                                          gatt.writeCharacteristic(ch)
+                                      }
+                                      if (ok2) result.success(true) else result.error("WRITE_FAIL", "BLE write busy", null)
                                   }
                               } else {
                                   result.error("NOT_CONN", "BLE not connected", null)
@@ -220,6 +257,70 @@ jobs:
                       }
                   }
               }
+
+              private fun startListeningCycle() {
+                  if (!isContinuousListening) return
+                  mainHandler.post {
+                      try {
+                          speechRecognizer?.destroy()
+                          speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+                          speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+                              override fun onReadyForSpeech(params: Bundle?) {}
+                              override fun onBeginningOfSpeech() {}
+                              override fun onRmsChanged(rmsdB: Float) {}
+                              override fun onBufferReceived(buffer: ByteArray?) {}
+                              override fun onEndOfSpeech() {}
+
+                              override fun onPartialResults(partialResults: Bundle?) {
+                                  val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                                  if (!partial.isNullOrEmpty()) {
+                                      methodChannel?.invokeMethod("onSpeechResult", partial)
+                                  }
+                              }
+
+                              override fun onResults(results: Bundle?) {
+                                  val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                                  if (!text.isNullOrEmpty()) {
+                                      methodChannel?.invokeMethod("onSpeechResult", text)
+                                  }
+                                  scheduleNextCycle(250)
+                              }
+
+                              override fun onError(error: Int) {
+                                  // Auto-restart on silence/timeout (errors 6 & 7) or busy (error 8)
+                                  if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                                      isContinuousListening = false
+                                      methodChannel?.invokeMethod("onSpeechStatus", "stopped")
+                                  } else {
+                                      scheduleNextCycle(400)
+                                  }
+                              }
+
+                              override fun onEvent(eventType: Int, params: Bundle?) {}
+                          })
+
+                          val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                              putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                              putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
+                              putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                          }
+                          speechRecognizer?.startListening(intent)
+                      } catch (_: Exception) {
+                          scheduleNextCycle(600)
+                      }
+                  }
+              }
+
+              private fun scheduleNextCycle(delayMs: Long) {
+                  if (!isContinuousListening) return
+                  mainHandler.postDelayed({ startListeningCycle() }, delayMs)
+              }
+
+              override fun onDestroy() {
+                  isContinuousListening = false
+                  speechRecognizer?.destroy()
+                  super.onDestroy()
+              }
           }
           EOF
 
@@ -231,3 +332,4 @@ jobs:
         with:
           name: RoboCar-Controller-APK
           path: build/app/outputs/flutter-apk/app-release.apk
+          
