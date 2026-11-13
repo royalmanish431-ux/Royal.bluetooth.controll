@@ -26,7 +26,7 @@ jobs:
       - name: Initialize Android Platform Files
         run: flutter create --platforms=android --project-name hc05_rover_controller .
 
-      - name: Configure Continuous SpeechRecognizer, BLE & Permissions
+      - name: Configure Continuous SpeechRecognizer, BLE UART + CRLF & Permissions
         run: |
           flutter pub get
           sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 34/g' android/app/build.gradle
@@ -143,19 +143,42 @@ jobs:
                                   override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
                                       if (status == BluetoothGatt.GATT_SUCCESS) {
                                           var foundChar: BluetoothGattCharacteristic? = null
+
+                                          // 1. Exact FFE0/FFE1 (HM-10, JDY-31, CC2541, AT-09)
                                           for (service in gatt.services) {
                                               for (ch in service.characteristics) {
                                                   val uuidStr = ch.uuid.toString().lowercase()
                                                   val props = ch.properties
                                                   val canWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0 ||
                                                                  (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
-                                                  if (canWrite && uuidStr.contains("ffe1")) {
+                                                  if (canWrite && uuidStr.startsWith("0000ffe1")) {
                                                       foundChar = ch
                                                       break
                                                   }
                                               }
                                               if (foundChar != null) break
                                           }
+
+                                          // 2. Fallback: Any writable + notifiable UART characteristic
+                                          if (foundChar == null) {
+                                              for (service in gatt.services) {
+                                                  val sUuid = service.uuid.toString().lowercase()
+                                                  if (sUuid.startsWith("00001800") || sUuid.startsWith("00001801")) continue
+                                                  for (ch in service.characteristics) {
+                                                      val props = ch.properties
+                                                      val canWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0 ||
+                                                                     (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                                                      val canNotify = (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0
+                                                      if (canWrite && canNotify) {
+                                                          foundChar = ch
+                                                          break
+                                                      }
+                                                  }
+                                                  if (foundChar != null) break
+                                              }
+                                          }
+
+                                          // 3. Fallback: First writable custom characteristic
                                           if (foundChar == null) {
                                               for (service in gatt.services) {
                                                   val sUuid = service.uuid.toString().lowercase()
@@ -204,12 +227,18 @@ jobs:
                           }
 
                           "send" -> {
-                              val data = call.argument<String>("data") ?: ""
+                              val rawData = call.argument<String>("data") ?: ""
+                              // Append \r\n just like Serial Bluetooth Terminal app
+                              val payload = "$rawData\r\n"
                               val gatt = bluetoothGatt
                               val ch = txCharacteristic
                               if (gatt != null && ch != null && isGattReady) {
-                                  val bytes = data.toByteArray(Charsets.UTF_8)
-                                  val writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                                  val bytes = payload.toByteArray(Charsets.UTF_8)
+                                  val writeType = if ((ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
+                                      BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                                  } else {
+                                      BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                                  }
 
                                   val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                       gatt.writeCharacteristic(ch, bytes, writeType) == BluetoothStatusCodes.SUCCESS
@@ -225,17 +254,7 @@ jobs:
                                   if (ok) {
                                       result.success(true)
                                   } else {
-                                      val ok2 = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                          gatt.writeCharacteristic(ch, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
-                                      } else {
-                                          @Suppress("DEPRECATION")
-                                          ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                                          @Suppress("DEPRECATION")
-                                          ch.value = bytes
-                                          @Suppress("DEPRECATION")
-                                          gatt.writeCharacteristic(ch)
-                                      }
-                                      if (ok2) result.success(true) else result.error("WRITE_FAIL", "BLE write busy", null)
+                                      result.error("WRITE_FAIL", "BLE write busy", null)
                                   }
                               } else {
                                   result.error("NOT_CONN", "BLE not connected", null)
@@ -287,7 +306,6 @@ jobs:
                               }
 
                               override fun onError(error: Int) {
-                                  // Auto-restart on silence/timeout (errors 6 & 7) or busy (error 8)
                                   if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                                       isContinuousListening = false
                                       methodChannel?.invokeMethod("onSpeechStatus", "stopped")
