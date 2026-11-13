@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:permission_handler/permission_handler.dart';
 
 void main() {
@@ -41,17 +40,33 @@ class _ControllerScreenState extends State<ControllerScreen> {
   bool _isConnecting = false;
   bool _isConnected = false;
 
-  late stt.SpeechToText _speech;
-  bool _isListening = false;
-  String _voiceText = 'Tap Mic & Say: Go, Back, Left, Right, Stop';
+  bool _continuousMicOn = false;
+  String _voiceText = 'Tap Mic ONCE for Continuous Hands-Free Mode';
   String _lastSentCommand = 'None';
   String _debugStatus = '';
 
   @override
   void initState() {
     super.initState();
-    _speech = stt.SpeechToText();
+    _btChannel.setMethodCallHandler(_handleNativeCallbacks);
     _initPermissionsAndDevices();
+  }
+
+  Future<dynamic> _handleNativeCallbacks(MethodCall call) async {
+    if (call.method == 'onSpeechResult') {
+      final String spoken = (call.arguments ?? '').toString();
+      if (spoken.isNotEmpty && mounted) {
+        setState(() {
+          _voiceText = spoken;
+        });
+        _processVoiceCommand(spoken.toLowerCase());
+      }
+    } else if (call.method == 'onSpeechStatus') {
+      final String status = (call.arguments ?? '').toString();
+      if (status == 'stopped' && mounted && _continuousMicOn) {
+        setState(() => _continuousMicOn = false);
+      }
+    }
   }
 
   Future<void> _initPermissionsAndDevices() async {
@@ -145,42 +160,30 @@ class _ControllerScreenState extends State<ControllerScreen> {
     }
   }
 
-  void _toggleListening() async {
-    if (!_isListening) {
-      bool available = await _speech.initialize(
-        onStatus: (val) {
-          if (val == 'done' || val == 'notListening') {
-            if (mounted) setState(() => _isListening = false);
-          }
-        },
-        onError: (val) {
-          if (mounted) setState(() => _isListening = false);
-          _showSnack('Mic Error: ${val.errorMsg}');
-        },
-      );
-      if (available) {
+  Future<void> _toggleContinuousMic() async {
+    if (!_continuousMicOn) {
+      final micStatus = await Permission.microphone.request();
+      if (!micStatus.isGranted) {
+        _showSnack('Microphone permission required!');
+        return;
+      }
+      try {
+        await _btChannel.invokeMethod('startContinuousVoice');
         setState(() {
-          _isListening = true;
-          _voiceText = 'Listening... Speak now';
+          _continuousMicOn = true;
+          _voiceText = 'Continuous Listening ON... Speak commands';
         });
-        _speech.listen(
-          listenFor: const Duration(seconds: 6),
-          pauseFor: const Duration(seconds: 2),
-          onResult: (val) {
-            setState(() {
-              _voiceText = val.recognizedWords;
-            });
-            if (val.recognizedWords.isNotEmpty) {
-              _processVoiceCommand(val.recognizedWords.toLowerCase());
-            }
-          },
-        );
-      } else {
-        _showSnack('Speech recognition not available');
+      } on PlatformException catch (e) {
+        _showSnack('Voice Error: ${e.message}');
       }
     } else {
-      setState(() => _isListening = false);
-      _speech.stop();
+      try {
+        await _btChannel.invokeMethod('stopContinuousVoice');
+      } catch (_) {}
+      setState(() {
+        _continuousMicOn = false;
+        _voiceText = 'Continuous Listening OFF';
+      });
     }
   }
 
@@ -430,6 +433,12 @@ class _ControllerScreenState extends State<ControllerScreen> {
               decoration: BoxDecoration(
                 color: const Color(0xFF1E293B),
                 borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: _continuousMicOn
+                      ? Colors.redAccent
+                      : Colors.transparent,
+                  width: 1.5,
+                ),
               ),
               child: Column(
                 children: [
@@ -449,18 +458,18 @@ class _ControllerScreenState extends State<ControllerScreen> {
                   ),
                   const SizedBox(height: 14),
                   GestureDetector(
-                    onTap: _toggleListening,
+                    onTap: _toggleContinuousMic,
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 250),
                       padding: const EdgeInsets.all(18),
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: _isListening
+                        color: _continuousMicOn
                             ? Colors.redAccent
                             : const Color(0xFF00E5FF),
                         boxShadow: [
                           BoxShadow(
-                            color: (_isListening
+                            color: (_continuousMicOn
                                     ? Colors.redAccent
                                     : const Color(0xFF00E5FF))
                                 .withOpacity(0.6),
@@ -470,10 +479,23 @@ class _ControllerScreenState extends State<ControllerScreen> {
                         ],
                       ),
                       child: Icon(
-                        _isListening ? Icons.mic : Icons.mic_none,
+                        _continuousMicOn ? Icons.mic : Icons.mic_none,
                         size: 32,
                         color: Colors.black,
                       ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _continuousMicOn
+                        ? 'LIVE MIC ON (Tap to Stop)'
+                        : 'TAP TO START CONTINUOUS MIC',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: _continuousMicOn
+                          ? Colors.redAccent
+                          : const Color(0xFF94A3B8),
                     ),
                   ),
                 ],
