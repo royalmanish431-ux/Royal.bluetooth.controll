@@ -368,4 +368,95 @@ jobs:
                               KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_BUTTON_A -> "B"
                               KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_BUTTON_X -> "L"
                               KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_BUTTON_B -> "R"
-                            
+                              else -> null
+                          }
+                          if (cmd != null && cmd != lastGamepadCmd) {
+                              lastGamepadCmd = cmd
+                              methodChannel?.invokeMethod("onGamepadCommand", cmd)
+                              return true
+                          }
+                      } else if (event.action == KeyEvent.ACTION_UP) {
+                          if (lastGamepadCmd != "S") {
+                              lastGamepadCmd = "S"
+                              methodChannel?.invokeMethod("onGamepadCommand", "S")
+                              return true
+                          }
+                      }
+                  }
+                  return super.dispatchKeyEvent(event)
+              }
+
+              private fun startListeningCycle() {
+                  if (!isContinuousListening) return
+                  mainHandler.post {
+                      try {
+                          speechRecognizer?.destroy()
+                          speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+                          speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+                              override fun onReadyForSpeech(params: Bundle?) {}
+                              override fun onBeginningOfSpeech() {}
+                              override fun onRmsChanged(rmsdB: Float) {}
+                              override fun onBufferReceived(buffer: ByteArray?) {}
+                              override fun onEndOfSpeech() {}
+
+                              override fun onPartialResults(partialResults: Bundle?) {
+                                  val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                                  if (!partial.isNullOrEmpty()) {
+                                      methodChannel?.invokeMethod("onSpeechResult", partial)
+                                  }
+                              }
+
+                              override fun onResults(results: Bundle?) {
+                                  val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                                  if (!text.isNullOrEmpty()) {
+                                      methodChannel?.invokeMethod("onSpeechResult", text)
+                                  }
+                                  scheduleNextCycle(250)
+                              }
+
+                              override fun onError(error: Int) {
+                                  if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                                      isContinuousListening = false
+                                      methodChannel?.invokeMethod("onSpeechStatus", "stopped")
+                                  } else {
+                                      scheduleNextCycle(400)
+                                  }
+                              }
+
+                              override fun onEvent(eventType: Int, params: Bundle?) {}
+                          })
+
+                          val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                              putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                              putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
+                              putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                          }
+                          speechRecognizer?.startListening(intent)
+                      } catch (_: Exception) {
+                          scheduleNextCycle(600)
+                      }
+                  }
+              }
+
+              private fun scheduleNextCycle(delayMs: Long) {
+                  if (!isContinuousListening) return
+                  mainHandler.postDelayed({ startListeningCycle() }, delayMs)
+              }
+
+              override fun onDestroy() {
+                  isContinuousListening = false
+                  speechRecognizer?.destroy()
+                  cleanupGatt()
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+      - name: Build Release APK
+        run: flutter build apk --release --no-tree-shake-icons
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Car-Automation-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
