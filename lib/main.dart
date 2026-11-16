@@ -4,17 +4,17 @@ import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 void main() {
-  runApp(const RoboCarApp());
+  runApp(const CarAutomationApp());
 }
 
-class RoboCarApp extends StatelessWidget {
-  const RoboCarApp({super.key});
+class CarAutomationApp extends StatelessWidget {
+  const CarAutomationApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'RoboCar Control',
+      title: 'Car Automation',
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF0B1120),
         primaryColor: const Color(0xFF00E5FF),
@@ -34,6 +34,9 @@ class ControllerScreen extends StatefulWidget {
 class _ControllerScreenState extends State<ControllerScreen> {
   static const MethodChannel _btChannel =
       MethodChannel('com.example.hc05_rover_controller/bluetooth');
+
+  // Auto-obstacle trigger characters sent automatically on connect
+  static const List<String> _autoObstacleChars = ['U', 'W', 'V', 'A'];
 
   List _devices = [];
   dynamic _selectedDevice;
@@ -65,6 +68,11 @@ class _ControllerScreenState extends State<ControllerScreen> {
       final String status = (call.arguments ?? '').toString();
       if (status == 'stopped' && mounted && _continuousMicOn) {
         setState(() => _continuousMicOn = false);
+      }
+    } else if (call.method == 'onGamepadCommand') {
+      final String cmd = (call.arguments ?? '').toString();
+      if (cmd.isNotEmpty && mounted) {
+        _sendCommand(cmd);
       }
     }
   }
@@ -101,6 +109,20 @@ class _ControllerScreenState extends State<ControllerScreen> {
     }
   }
 
+  Future<void> _triggerAutoObstacleMode() async {
+    if (!_isConnected) return;
+    for (final ch in _autoObstacleChars) {
+      if (!_isConnected) break;
+      await _sendCommand(ch, silent: true);
+      await Future.delayed(const Duration(milliseconds: 60));
+    }
+    if (mounted) {
+      setState(() {
+        _lastSentCommand = 'AUTO (U/W/V/A)';
+      });
+    }
+  }
+
   Future<void> _connectToDevice(dynamic device) async {
     if (_isConnecting) return;
 
@@ -122,7 +144,9 @@ class _ControllerScreenState extends State<ControllerScreen> {
       });
 
       if (connected) {
-        _showSnack('Connected to ${device['name']}');
+        _showSnack('Connected! Auto Obstacle Mode Active');
+        await Future.delayed(const Duration(milliseconds: 250));
+        await _triggerAutoObstacleMode();
       }
     } on PlatformException catch (e) {
       setState(() {
@@ -144,10 +168,12 @@ class _ControllerScreenState extends State<ControllerScreen> {
     });
   }
 
-  Future<void> _sendCommand(String cmd) async {
-    setState(() {
-      _lastSentCommand = cmd;
-    });
+  Future<void> _sendCommand(String cmd, {bool silent = false}) async {
+    if (!silent) {
+      setState(() {
+        _lastSentCommand = cmd;
+      });
+    }
     if (_isConnected) {
       try {
         await _btChannel.invokeMethod('send', {'data': cmd});
@@ -155,7 +181,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
         setState(() => _isConnected = false);
         _showSnack('Disconnected: ${e.message}');
       }
-    } else {
+    } else if (!silent) {
       _showSnack('Not connected to HC-05!');
     }
   }
@@ -205,6 +231,8 @@ class _ControllerScreenState extends State<ControllerScreen> {
         words.contains('halt') ||
         words.contains('ruk')) {
       _sendCommand('*');
+    } else if (words.contains('auto') || words.contains('sensor')) {
+      _triggerAutoObstacleMode();
     }
   }
 
@@ -323,8 +351,30 @@ class _ControllerScreenState extends State<ControllerScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('ROBOCAR CONTROLLER',
-            style: TextStyle(letterSpacing: 1.5, fontWeight: FontWeight.bold)),
+        toolbarHeight: 68,
+        title: const Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'CAR AUTOMATION',
+              style: TextStyle(
+                letterSpacing: 1.5,
+                fontWeight: FontWeight.bold,
+                fontSize: 20,
+              ),
+            ),
+            SizedBox(height: 3),
+            Text(
+              'Design By Manish Royal',
+              style: TextStyle(
+                fontSize: 12,
+                letterSpacing: 1.1,
+                fontWeight: FontWeight.w500,
+                color: Color(0xFF00E5FF),
+              ),
+            ),
+          ],
+        ),
         centerTitle: true,
         backgroundColor: Colors.transparent,
         elevation: 0,
@@ -396,7 +446,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
 
             if (_debugStatus.isNotEmpty)
               Padding(
-                padding: const EdgeInsets.only(top: 8.0),
+                padding: const EdgeInsets.only(top: 6.0),
                 child: Text(
                   _debugStatus,
                   style: const TextStyle(color: Colors.amber, fontSize: 12),
@@ -429,7 +479,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
 
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
                 color: const Color(0xFF1E293B),
                 borderRadius: BorderRadius.circular(18),
@@ -446,7 +496,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
                     _voiceText,
                     textAlign: TextAlign.center,
                     style: const TextStyle(
-                        fontSize: 15, color: Color(0xFF94A3B8)),
+                        fontSize: 14, color: Color(0xFF94A3B8)),
                   ),
                   const SizedBox(height: 6),
                   Text(
@@ -456,12 +506,12 @@ class _ControllerScreenState extends State<ControllerScreen> {
                         color: Color(0xFF00E5FF),
                         fontWeight: FontWeight.bold),
                   ),
-                  const SizedBox(height: 14),
+                  const SizedBox(height: 12),
                   GestureDetector(
                     onTap: _toggleContinuousMic,
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 250),
-                      padding: const EdgeInsets.all(18),
+                      padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         color: _continuousMicOn
@@ -480,12 +530,12 @@ class _ControllerScreenState extends State<ControllerScreen> {
                       ),
                       child: Icon(
                         _continuousMicOn ? Icons.mic : Icons.mic_none,
-                        size: 32,
+                        size: 30,
                         color: Colors.black,
                       ),
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 6),
                   Text(
                     _continuousMicOn
                         ? 'LIVE MIC ON (Tap to Stop)'
