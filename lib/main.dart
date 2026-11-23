@@ -35,13 +35,17 @@ class _ControllerScreenState extends State<ControllerScreen> {
   static const MethodChannel _btChannel =
       MethodChannel('com.example.hc05_rover_controller/bluetooth');
 
-  // Auto-obstacle trigger characters sent automatically on connect
-  static const List<String> _autoObstacleChars = ['U', 'W', 'V', 'A'];
+  // Obstacle trigger character (Broxcode / Arduino standard)
+  static const String _obstacleChar = 'U';
 
   List _devices = [];
   dynamic _selectedDevice;
   bool _isConnecting = false;
   bool _isConnected = false;
+
+  bool _isManualHold = false;
+  bool _autoObstacleEnabled = true;
+  Timer? _obstacleHeartbeatTimer;
 
   bool _continuousMicOn = false;
   String _voiceText = 'Tap Mic ONCE for Continuous Hands-Free Mode';
@@ -53,6 +57,12 @@ class _ControllerScreenState extends State<ControllerScreen> {
     super.initState();
     _btChannel.setMethodCallHandler(_handleNativeCallbacks);
     _initPermissionsAndDevices();
+  }
+
+  @override
+  void dispose() {
+    _obstacleHeartbeatTimer?.cancel();
+    super.dispose();
   }
 
   Future<dynamic> _handleNativeCallbacks(MethodCall call) async {
@@ -72,7 +82,17 @@ class _ControllerScreenState extends State<ControllerScreen> {
     } else if (call.method == 'onGamepadCommand') {
       final String cmd = (call.arguments ?? '').toString();
       if (cmd.isNotEmpty && mounted) {
-        _sendCommand(cmd);
+        if (cmd == 'S') {
+          _isManualHold = false;
+          await _sendCommand('S');
+          if (_autoObstacleEnabled) {
+            await Future.delayed(const Duration(milliseconds: 120));
+            await _sendCommand(_obstacleChar, silent: true);
+          }
+        } else {
+          _isManualHold = true;
+          await _sendCommand(cmd);
+        }
       }
     }
   }
@@ -109,18 +129,14 @@ class _ControllerScreenState extends State<ControllerScreen> {
     }
   }
 
-  Future<void> _triggerAutoObstacleMode() async {
-    if (!_isConnected) return;
-    for (final ch in _autoObstacleChars) {
-      if (!_isConnected) break;
-      await _sendCommand(ch, silent: true);
-      await Future.delayed(const Duration(milliseconds: 60));
-    }
-    if (mounted) {
-      setState(() {
-        _lastSentCommand = 'AUTO (U/W/V/A)';
-      });
-    }
+  void _startObstacleHeartbeat() {
+    _obstacleHeartbeatTimer?.cancel();
+    _obstacleHeartbeatTimer =
+        Timer.periodic(const Duration(milliseconds: 450), (_) async {
+      if (_isConnected && _autoObstacleEnabled && !_isManualHold) {
+        await _sendCommand(_obstacleChar, silent: true);
+      }
+    });
   }
 
   Future<void> _connectToDevice(dynamic device) async {
@@ -140,13 +156,16 @@ class _ControllerScreenState extends State<ControllerScreen> {
       setState(() {
         _isConnected = connected;
         _isConnecting = false;
+        _autoObstacleEnabled = true;
+        _isManualHold = false;
         _debugStatus = connected ? '' : 'Connection returned false';
       });
 
       if (connected) {
         _showSnack('Connected! Auto Obstacle Mode Active');
         await Future.delayed(const Duration(milliseconds: 250));
-        await _triggerAutoObstacleMode();
+        await _sendCommand(_obstacleChar);
+        _startObstacleHeartbeat();
       }
     } on PlatformException catch (e) {
       setState(() {
@@ -159,17 +178,19 @@ class _ControllerScreenState extends State<ControllerScreen> {
   }
 
   Future<void> _disconnect() async {
+    _obstacleHeartbeatTimer?.cancel();
     try {
       await _btChannel.invokeMethod('disconnect');
     } catch (_) {}
     setState(() {
       _isConnected = false;
+      _isManualHold = false;
       _debugStatus = '';
     });
   }
 
   Future<void> _sendCommand(String cmd, {bool silent = false}) async {
-    if (!silent) {
+    if (!silent && mounted) {
       setState(() {
         _lastSentCommand = cmd;
       });
@@ -178,7 +199,8 @@ class _ControllerScreenState extends State<ControllerScreen> {
       try {
         await _btChannel.invokeMethod('send', {'data': cmd});
       } on PlatformException catch (e) {
-        setState(() => _isConnected = false);
+        _obstacleHeartbeatTimer?.cancel();
+        if (mounted) setState(() => _isConnected = false);
         _showSnack('Disconnected: ${e.message}');
       }
     } else if (!silent) {
@@ -218,21 +240,29 @@ class _ControllerScreenState extends State<ControllerScreen> {
         words.contains('go') ||
         words.contains('straight') ||
         words.contains('aage')) {
+      _autoObstacleEnabled = false;
       _sendCommand('^');
     } else if (words.contains('back') ||
         words.contains('reverse') ||
         words.contains('peeche')) {
+      _autoObstacleEnabled = false;
       _sendCommand('-');
     } else if (words.contains('left') || words.contains('baye')) {
+      _autoObstacleEnabled = false;
       _sendCommand('<');
     } else if (words.contains('right') || words.contains('daye')) {
+      _autoObstacleEnabled = false;
       _sendCommand('>');
     } else if (words.contains('stop') ||
         words.contains('halt') ||
         words.contains('ruk')) {
+      _autoObstacleEnabled = false;
       _sendCommand('*');
     } else if (words.contains('auto') || words.contains('sensor')) {
-      _triggerAutoObstacleMode();
+      _autoObstacleEnabled = true;
+      _isManualHold = false;
+      _sendCommand(_obstacleChar);
+      _startObstacleHeartbeat();
     }
   }
 
@@ -311,12 +341,35 @@ class _ControllerScreenState extends State<ControllerScreen> {
   Widget _buildControlBtn(IconData icon, String label, String cmd,
       {Color color = const Color(0xFF1E293B)}) {
     return GestureDetector(
-      onTapDown: (_) => _sendCommand(cmd),
-      onTapUp: (_) {
-        if (cmd != 'S') _sendCommand('S');
+      onTapDown: (_) async {
+        if (cmd == 'S') {
+          _autoObstacleEnabled = false;
+          _isManualHold = false;
+          await _sendCommand('S');
+        } else {
+          _isManualHold = true;
+          await _sendCommand(cmd);
+        }
       },
-      onTapCancel: () {
-        if (cmd != 'S') _sendCommand('S');
+      onTapUp: (_) async {
+        if (cmd != 'S') {
+          _isManualHold = false;
+          await _sendCommand('S');
+          if (_autoObstacleEnabled) {
+            await Future.delayed(const Duration(milliseconds: 140));
+            await _sendCommand(_obstacleChar);
+          }
+        }
+      },
+      onTapCancel: () async {
+        if (cmd != 'S') {
+          _isManualHold = false;
+          await _sendCommand('S');
+          if (_autoObstacleEnabled) {
+            await Future.delayed(const Duration(milliseconds: 140));
+            await _sendCommand(_obstacleChar);
+          }
+        }
       },
       child: Container(
         width: 82,
