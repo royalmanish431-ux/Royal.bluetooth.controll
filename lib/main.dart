@@ -35,7 +35,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
   static const MethodChannel _btChannel =
       MethodChannel('com.example.hc05_rover_controller/bluetooth');
 
-  // Obstacle trigger character (Broxcode / Arduino standard)
+  // Always-ON obstacle sensor trigger character
   static const String _obstacleChar = 'U';
 
   List _devices = [];
@@ -43,8 +43,6 @@ class _ControllerScreenState extends State<ControllerScreen> {
   bool _isConnecting = false;
   bool _isConnected = false;
 
-  bool _isManualHold = false;
-  bool _autoObstacleEnabled = true;
   Timer? _obstacleHeartbeatTimer;
 
   bool _continuousMicOn = false;
@@ -82,17 +80,7 @@ class _ControllerScreenState extends State<ControllerScreen> {
     } else if (call.method == 'onGamepadCommand') {
       final String cmd = (call.arguments ?? '').toString();
       if (cmd.isNotEmpty && mounted) {
-        if (cmd == 'S') {
-          _isManualHold = false;
-          await _sendCommand('S');
-          if (_autoObstacleEnabled) {
-            await Future.delayed(const Duration(milliseconds: 120));
-            await _sendCommand(_obstacleChar, silent: true);
-          }
-        } else {
-          _isManualHold = true;
-          await _sendCommand(cmd);
-        }
+        await _sendCommandWithAutoSensor(cmd);
       }
     }
   }
@@ -129,12 +117,13 @@ class _ControllerScreenState extends State<ControllerScreen> {
     }
   }
 
-  void _startObstacleHeartbeat() {
+  // Always-ON 350ms sensor heartbeat — never pauses
+  void _startAlwaysOnSensorHeartbeat() {
     _obstacleHeartbeatTimer?.cancel();
     _obstacleHeartbeatTimer =
-        Timer.periodic(const Duration(milliseconds: 450), (_) async {
-      if (_isConnected && _autoObstacleEnabled && !_isManualHold) {
-        await _sendCommand(_obstacleChar, silent: true);
+        Timer.periodic(const Duration(milliseconds: 350), (_) async {
+      if (_isConnected) {
+        await _sendRaw(_obstacleChar, silent: true);
       }
     });
   }
@@ -156,16 +145,14 @@ class _ControllerScreenState extends State<ControllerScreen> {
       setState(() {
         _isConnected = connected;
         _isConnecting = false;
-        _autoObstacleEnabled = true;
-        _isManualHold = false;
         _debugStatus = connected ? '' : 'Connection returned false';
       });
 
       if (connected) {
-        _showSnack('Connected! Auto Obstacle Mode Active');
-        await Future.delayed(const Duration(milliseconds: 250));
-        await _sendCommand(_obstacleChar);
-        _startObstacleHeartbeat();
+        _showSnack('Connected! Ultrasonic Sensor Always Active');
+        await Future.delayed(const Duration(milliseconds: 200));
+        await _sendRaw(_obstacleChar);
+        _startAlwaysOnSensorHeartbeat();
       }
     } on PlatformException catch (e) {
       setState(() {
@@ -184,15 +171,14 @@ class _ControllerScreenState extends State<ControllerScreen> {
     } catch (_) {}
     setState(() {
       _isConnected = false;
-      _isManualHold = false;
       _debugStatus = '';
     });
   }
 
-  Future<void> _sendCommand(String cmd, {bool silent = false}) async {
+  Future<void> _sendRaw(String cmd, {bool silent = false}) async {
     if (!silent && mounted) {
       setState(() {
-        _lastSentCommand = cmd;
+        _lastSentCommand = '$cmd + AUTO($_obstacleChar)';
       });
     }
     if (_isConnected) {
@@ -205,6 +191,15 @@ class _ControllerScreenState extends State<ControllerScreen> {
       }
     } else if (!silent) {
       _showSnack('Not connected to HC-05!');
+    }
+  }
+
+  // Sends manual/voice command and immediately keeps sensor ('U') active
+  Future<void> _sendCommandWithAutoSensor(String cmd) async {
+    await _sendRaw(cmd);
+    if (_isConnected) {
+      await Future.delayed(const Duration(milliseconds: 80));
+      await _sendRaw(_obstacleChar, silent: true);
     }
   }
 
@@ -240,29 +235,19 @@ class _ControllerScreenState extends State<ControllerScreen> {
         words.contains('go') ||
         words.contains('straight') ||
         words.contains('aage')) {
-      _autoObstacleEnabled = false;
-      _sendCommand('^');
+      _sendCommandWithAutoSensor('^');
     } else if (words.contains('back') ||
         words.contains('reverse') ||
         words.contains('peeche')) {
-      _autoObstacleEnabled = false;
-      _sendCommand('-');
+      _sendCommandWithAutoSensor('-');
     } else if (words.contains('left') || words.contains('baye')) {
-      _autoObstacleEnabled = false;
-      _sendCommand('<');
+      _sendCommandWithAutoSensor('<');
     } else if (words.contains('right') || words.contains('daye')) {
-      _autoObstacleEnabled = false;
-      _sendCommand('>');
+      _sendCommandWithAutoSensor('>');
     } else if (words.contains('stop') ||
         words.contains('halt') ||
         words.contains('ruk')) {
-      _autoObstacleEnabled = false;
-      _sendCommand('*');
-    } else if (words.contains('auto') || words.contains('sensor')) {
-      _autoObstacleEnabled = true;
-      _isManualHold = false;
-      _sendCommand(_obstacleChar);
-      _startObstacleHeartbeat();
+      _sendCommandWithAutoSensor('*');
     }
   }
 
@@ -341,35 +326,12 @@ class _ControllerScreenState extends State<ControllerScreen> {
   Widget _buildControlBtn(IconData icon, String label, String cmd,
       {Color color = const Color(0xFF1E293B)}) {
     return GestureDetector(
-      onTapDown: (_) async {
-        if (cmd == 'S') {
-          _autoObstacleEnabled = false;
-          _isManualHold = false;
-          await _sendCommand('S');
-        } else {
-          _isManualHold = true;
-          await _sendCommand(cmd);
-        }
+      onTapDown: (_) => _sendCommandWithAutoSensor(cmd),
+      onTapUp: (_) {
+        if (cmd != 'S') _sendCommandWithAutoSensor('S');
       },
-      onTapUp: (_) async {
-        if (cmd != 'S') {
-          _isManualHold = false;
-          await _sendCommand('S');
-          if (_autoObstacleEnabled) {
-            await Future.delayed(const Duration(milliseconds: 140));
-            await _sendCommand(_obstacleChar);
-          }
-        }
-      },
-      onTapCancel: () async {
-        if (cmd != 'S') {
-          _isManualHold = false;
-          await _sendCommand('S');
-          if (_autoObstacleEnabled) {
-            await Future.delayed(const Duration(milliseconds: 140));
-            await _sendCommand(_obstacleChar);
-          }
-        }
+      onTapCancel: () {
+        if (cmd != 'S') _sendCommandWithAutoSensor('S');
       },
       child: Container(
         width: 82,
